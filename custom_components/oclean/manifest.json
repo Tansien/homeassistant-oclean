@@ -1,0 +1,19 @@
+{
+  "domain": "oclean",
+  "name": "Oclean",
+  "bluetooth": [
+    {
+      "connectable": true,
+      "local_name": "Oclean *"
+    }
+  ],
+  "codeowners": ["@Tansien"],
+  "config_flow": true,
+  "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://github.com/Tansien/homeassistant-oclean",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Tansien/homeassistant-oclean/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

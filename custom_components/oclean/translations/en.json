@@ -1,0 +1,25 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "This Oclean toothbrush is already configured.",
+      "no_devices_found": "No unconfigured Oclean toothbrushes were found."
+    },
+    "step": {
+      "bluetooth_confirm": {
+        "description": "Add {name}?"
+      },
+      "user": {
+        "data": {
+          "address": "Device"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      }
+    }
+  }
+}
