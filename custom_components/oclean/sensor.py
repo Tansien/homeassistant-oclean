@@ -21,7 +21,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -126,14 +126,33 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             try:
                 await asyncio.sleep(2)
+                metadata_changed = False
                 for key, uuid in (
                     (KEY_MODEL, MODEL_NUMBER_UUID),
                     (KEY_SOFTWARE, SOFTWARE_REVISION_UUID),
                     (KEY_HARDWARE, HARDWARE_REVISION_UUID),
                 ):
-                    with suppress(BleakError, TimeoutError, UnicodeDecodeError):
+                    try:
                         value = await client.read_gatt_char(uuid)
-                        data[key] = value.decode().strip("\x00").strip()
+                        decoded = value.decode().strip("\x00").strip()
+                    except (BleakError, TimeoutError, UnicodeDecodeError):
+                        continue
+                    if decoded and decoded != data.get(key):
+                        data[key] = decoded
+                        metadata_changed = True
+
+                if metadata_changed:
+                    registry = dr.async_get(self.hass)
+                    device_entry = registry.async_get_device(
+                        identifiers={(DOMAIN, self.address)}
+                    )
+                    if device_entry is not None:
+                        registry.async_update_device(
+                            device_entry.id,
+                            model=data.get(KEY_MODEL),
+                            sw_version=data.get(KEY_SOFTWARE),
+                            hw_version=data.get(KEY_HARDWARE),
+                        )
 
                 with suppress(BleakError, TimeoutError, ValueError):
                     data[KEY_BATTERY] = parse_battery_level(
@@ -143,20 +162,36 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 parser = OcleanNotificationParser(self.timezone)
                 session_received = asyncio.Event()
 
-                def notification_handler(_sender: Any, raw: bytearray) -> None:
-                    payload = bytes(raw)
-                    _LOGGER.debug(
-                        "Oclean %s notification: %s", self.address, payload.hex()
-                    )
-                    parsed = parser.feed(payload)
+                def accept(parsed: dict[str, Any]) -> None:
                     merge_update(data, parsed)
                     if KEY_LAST_SESSION in parsed:
                         session_received.set()
 
+                def status_handler(_sender: Any, raw: bytearray) -> None:
+                    payload = bytes(raw)
+                    _LOGGER.debug(
+                        "Oclean %s status notification: %s",
+                        self.address,
+                        payload.hex(),
+                    )
+                    accept(parser.feed_status(payload))
+
+                def session_handler(_sender: Any, raw: bytearray) -> None:
+                    payload = bytes(raw)
+                    _LOGGER.debug(
+                        "Oclean %s session notification: %s",
+                        self.address,
+                        payload.hex(),
+                    )
+                    accept(parser.feed_session(payload))
+
                 subscribed: list[str] = []
-                for uuid in (READ_NOTIFY_UUID, RECEIVE_BRUSH_UUID):
+                for uuid, handler in (
+                    (READ_NOTIFY_UUID, status_handler),
+                    (RECEIVE_BRUSH_UUID, session_handler),
+                ):
                     try:
-                        await client.start_notify(uuid, notification_handler)
+                        await client.start_notify(uuid, handler)
                         subscribed.append(uuid)
                     except (BleakError, TimeoutError) as err:
                         _LOGGER.debug(
@@ -186,9 +221,32 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                     await asyncio.sleep(0.1)
 
-                if subscribed:
+                if RECEIVE_BRUSH_UUID in subscribed:
                     with suppress(TimeoutError):
                         await asyncio.wait_for(session_received.wait(), timeout=8)
+                else:
+                    direct_read_ok = False
+                    previous_payload = b""
+                    for _attempt in range(6):
+                        await asyncio.sleep(1)
+                        try:
+                            payload = bytes(
+                                await client.read_gatt_char(RECEIVE_BRUSH_UUID)
+                            )
+                        except (BleakError, TimeoutError):
+                            continue
+                        direct_read_ok = True
+                        if len(payload) > 2 and payload != previous_payload:
+                            previous_payload = payload
+                            session_handler(None, bytearray(payload))
+                        if session_received.is_set():
+                            break
+                    if not direct_read_ok:
+                        _LOGGER.warning(
+                            "Unable to receive Oclean session data from %s: "
+                            "notifications and direct reads unavailable",
+                            self.address,
+                        )
                 merge_update(data, parser.flush())
 
                 for uuid in subscribed:
@@ -217,13 +275,21 @@ class OcleanSensor(CoordinatorEntity[OcleanCoordinator], SensorEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.address}_{description.key}"
-        self._attr_device_info = DeviceInfo(
+        self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, coordinator.address)},
             manufacturer="Oclean",
             name=entry.title,
             model=coordinator.data.get(KEY_MODEL),
             sw_version=coordinator.data.get(KEY_SOFTWARE),
             hw_version=coordinator.data.get(KEY_HARDWARE),
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return whether this value has ever been observed."""
+        return (
+            super().available
+            and self.entity_description.key in self.coordinator.data
         )
 
     @property

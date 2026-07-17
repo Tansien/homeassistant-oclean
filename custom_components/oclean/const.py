@@ -1,6 +1,6 @@
 """Constants and protocol parsing for the Oclean integration."""
 
-from datetime import UTC, datetime, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
 DOMAIN = "oclean"
@@ -26,6 +26,8 @@ SESSION_KEYS = (KEY_LAST_SESSION, KEY_DURATION, KEY_SCORE, KEY_PROGRAM)
 
 SESSION_RECORD_SIZE = 42
 MAX_SESSION_RECORDS = 64
+MIN_SESSION_YEAR = 2015
+MAX_FUTURE_SKEW = timedelta(days=1)
 _MAGIC = b"\x03\x07*B#"
 _TZ_OFFSETS_MIN = (
     -720,
@@ -129,10 +131,14 @@ def _parse_session(
             )
         except ValueError:
             continue
-        if record[0] or candidate <= now:
+        if record[0] or candidate <= now + MAX_FUTURE_SKEW:
             local = candidate
             break
-    if local is None:
+    if (
+        local is None
+        or local.year < MIN_SESSION_YEAR
+        or local > now + MAX_FUTURE_SKEW
+    ):
         return {}
 
     result = {KEY_LAST_SESSION: local.astimezone(UTC)}
@@ -154,14 +160,18 @@ class OcleanNotificationParser:
         self._buffer = bytearray()
         self._expected = 0
 
-    def feed(self, data: bytes) -> dict[str, Any]:
-        """Consume one notification and return newly decoded values."""
+    def feed_status(self, data: bytes) -> dict[str, Any]:
+        """Parse one status-channel notification."""
+        if data[:2] == b"\x03\x03" and len(data) >= 6 and data[5] <= 100:
+            return {KEY_BATTERY: data[5]}
+        return {}
+
+    def feed_session(self, data: bytes) -> dict[str, Any]:
+        """Consume one session-channel notification."""
         if self._expected:
             self._buffer.extend(data)
             return self._finish() if len(self._buffer) >= self._expected else {}
 
-        if data[:2] == b"\x03\x03" and len(data) >= 6 and data[5] <= 100:
-            return {KEY_BATTERY: data[5]}
         if not data.startswith(_MAGIC) or len(data) < 7:
             return {}
 
@@ -219,10 +229,15 @@ if __name__ == "__main__":
     record = bytearray(SESSION_RECORD_SIZE)
     record[:9] = bytes.fromhex("1a07110c22384c0096")
     record[33] = 98
+    future = bytearray(record)
+    future[0] = 255
+    future[33] = 91
     parser = OcleanNotificationParser(UTC)
-    assert not parser.feed(_MAGIC + b"\x00\x01" + record[:13])
-    assert not parser.feed(record[13:33])
-    parsed = parser.feed(record[33:])
+    assert not parser.feed_session(_MAGIC + b"\x00\x02" + future[:13])
+    assert parser.feed_status(bytes.fromhex("0303020e4b640000")) == {
+        KEY_BATTERY: 100
+    }
+    parsed = parser.feed_session(future[13:] + record)
     assert parsed[KEY_LAST_SESSION] == datetime(2026, 7, 17, 12, 34, 56, tzinfo=UTC)
     assert parsed[KEY_PROGRAM] == 76
     assert parsed[KEY_DURATION] == 150
