@@ -19,6 +19,18 @@
     "sensor": {
       "battery": {
         "name": "Battery"
+      },
+      "duration": {
+        "name": "Last session duration"
+      },
+      "last_session": {
+        "name": "Last session"
+      },
+      "program": {
+        "name": "Last session program"
+      },
+      "score": {
+        "name": "Last session score"
       }
     }
   }
