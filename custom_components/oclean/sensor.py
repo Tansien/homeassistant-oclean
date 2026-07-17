@@ -55,6 +55,7 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 SCAN_INTERVAL = timedelta(minutes=30)
+ENRICHMENT_WAIT = 1.5
 PARALLEL_UPDATES = 1
 
 SENSORS = (
@@ -110,7 +111,6 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hass, _LOGGER, name=DOMAIN, update_interval=SCAN_INTERVAL
         )
         self.address = address
-        self.timezone = ZoneInfo(hass.config.time_zone)
 
     async def _async_update_data(self) -> dict[str, Any]:
         data = dict(self.data or {})
@@ -126,32 +126,29 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             try:
                 await asyncio.sleep(2)
-                metadata_changed = False
-                for key, uuid in (
-                    (KEY_MODEL, MODEL_NUMBER_UUID),
-                    (KEY_SOFTWARE, SOFTWARE_REVISION_UUID),
-                    (KEY_HARDWARE, HARDWARE_REVISION_UUID),
+                metadata_updates: dict[str, str] = {}
+                for key, uuid, registry_field in (
+                    (KEY_MODEL, MODEL_NUMBER_UUID, "model"),
+                    (KEY_SOFTWARE, SOFTWARE_REVISION_UUID, "sw_version"),
+                    (KEY_HARDWARE, HARDWARE_REVISION_UUID, "hw_version"),
                 ):
                     try:
                         value = await client.read_gatt_char(uuid)
                         decoded = value.decode().strip("\x00").strip()
                     except (BleakError, TimeoutError, UnicodeDecodeError):
                         continue
-                    if decoded and decoded != data.get(key):
+                    if decoded:
                         data[key] = decoded
-                        metadata_changed = True
+                        metadata_updates[registry_field] = decoded
 
-                if metadata_changed:
+                if metadata_updates:
                     registry = dr.async_get(self.hass)
                     device_entry = registry.async_get_device(
                         identifiers={(DOMAIN, self.address)}
                     )
                     if device_entry is not None:
                         registry.async_update_device(
-                            device_entry.id,
-                            model=data.get(KEY_MODEL),
-                            sw_version=data.get(KEY_SOFTWARE),
-                            hw_version=data.get(KEY_HARDWARE),
+                            device_entry.id, **metadata_updates
                         )
 
                 with suppress(BleakError, TimeoutError, ValueError):
@@ -159,13 +156,26 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         await client.read_gatt_char(BATTERY_LEVEL_UUID)
                     )
 
-                parser = OcleanNotificationParser(self.timezone)
+                timezone = ZoneInfo(self.hass.config.time_zone)
+                parser = OcleanNotificationParser(timezone)
                 session_received = asyncio.Event()
+                pending_score: int | None = None
 
                 def accept(parsed: dict[str, Any]) -> None:
-                    merge_update(data, parsed)
+                    nonlocal pending_score
+                    if KEY_SCORE in parsed and KEY_LAST_SESSION not in parsed:
+                        if not session_received.is_set():
+                            pending_score = parsed[KEY_SCORE]
+                            return
+                        merge_update(data, parsed)
+                        return
+                    if not merge_update(data, parsed):
+                        return
                     if KEY_LAST_SESSION in parsed:
                         session_received.set()
+                        if pending_score is not None:
+                            merge_update(data, {KEY_SCORE: pending_score})
+                            pending_score = None
 
                 def status_handler(_sender: Any, raw: bytearray) -> None:
                     payload = bytes(raw)
@@ -204,7 +214,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 with suppress(BleakError, TimeoutError, ValueError):
                     await client.write_gatt_char(
                         WRITE_UUID,
-                        build_time_command(datetime.now(self.timezone)),
+                        build_time_command(datetime.now(timezone)),
                         response=True,
                     )
                 for command in (b"\x03\x03", b"\x03\x07"):
@@ -226,20 +236,25 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         await asyncio.wait_for(session_received.wait(), timeout=8)
                 else:
                     direct_read_ok = False
-                    previous_payload = b""
+                    previous_payloads: dict[str, bytes] = {}
                     for _attempt in range(6):
                         await asyncio.sleep(1)
-                        try:
-                            payload = bytes(
-                                await client.read_gatt_char(RECEIVE_BRUSH_UUID)
-                            )
-                        except (BleakError, TimeoutError):
-                            continue
-                        direct_read_ok = True
-                        if len(payload) > 2 and payload != previous_payload:
-                            previous_payload = payload
-                            session_handler(None, bytearray(payload))
-                        if session_received.is_set():
+                        for uuid, handler in (
+                            (RECEIVE_BRUSH_UUID, session_handler),
+                            (READ_NOTIFY_UUID, status_handler),
+                        ):
+                            try:
+                                payload = bytes(await client.read_gatt_char(uuid))
+                            except (BleakError, TimeoutError):
+                                continue
+                            direct_read_ok = True
+                            if (
+                                len(payload) > 2
+                                and payload != previous_payloads.get(uuid)
+                            ):
+                                previous_payloads[uuid] = payload
+                                handler(None, bytearray(payload))
+                        if session_received.is_set() and KEY_SCORE in data:
                             break
                     if not direct_read_ok:
                         _LOGGER.warning(
@@ -247,6 +262,8 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             "notifications and direct reads unavailable",
                             self.address,
                         )
+                if session_received.is_set():
+                    await asyncio.sleep(ENRICHMENT_WAIT)
                 merge_update(data, parser.flush())
 
                 for uuid in subscribed:
@@ -275,14 +292,19 @@ class OcleanSensor(CoordinatorEntity[OcleanCoordinator], SensorEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.address}_{description.key}"
-        self._attr_device_info = dr.DeviceInfo(
+        device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, coordinator.address)},
+            connections={(dr.CONNECTION_BLUETOOTH, coordinator.address)},
             manufacturer="Oclean",
             name=entry.title,
-            model=coordinator.data.get(KEY_MODEL),
-            sw_version=coordinator.data.get(KEY_SOFTWARE),
-            hw_version=coordinator.data.get(KEY_HARDWARE),
         )
+        if KEY_MODEL in coordinator.data:
+            device_info["model"] = coordinator.data[KEY_MODEL]
+        if KEY_SOFTWARE in coordinator.data:
+            device_info["sw_version"] = coordinator.data[KEY_SOFTWARE]
+        if KEY_HARDWARE in coordinator.data:
+            device_info["hw_version"] = coordinator.data[KEY_HARDWARE]
+        self._attr_device_info = device_info
 
     @property
     def available(self) -> bool:

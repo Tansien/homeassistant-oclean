@@ -98,16 +98,17 @@ def build_time_command(now: datetime) -> bytes:
     )
 
 
-def merge_update(current: dict[str, Any], incoming: dict[str, Any]) -> None:
+def merge_update(current: dict[str, Any], incoming: dict[str, Any]) -> bool:
     """Merge data without retaining fields from an older brushing session."""
     timestamp = incoming.get(KEY_LAST_SESSION)
     previous = current.get(KEY_LAST_SESSION)
     if timestamp is not None and previous is not None and timestamp < previous:
-        return
+        return False
     if timestamp is not None and (previous is None or timestamp > previous):
         for key in SESSION_KEYS:
             current.pop(key, None)
     current.update(incoming)
+    return True
 
 
 def _parse_session(
@@ -164,6 +165,16 @@ class OcleanNotificationParser:
         """Parse one status-channel notification."""
         if data[:2] == b"\x03\x03" and len(data) >= 6 and data[5] <= 100:
             return {KEY_BATTERY: data[5]}
+        if data[:2] == b"\x00\x00" and len(data) >= 3 and data[2] <= 100:
+            return {KEY_SCORE: data[2]}
+        if (
+            data.startswith(_MAGIC)
+            and len(data) >= 7
+            and data[5:7] == b"\x00\x00"
+        ):
+            return _parse_session(
+                data[7:], self._timezone, datetime.now(self._timezone)
+            )
         return {}
 
     def feed_session(self, data: bytes) -> dict[str, Any]:
@@ -172,6 +183,8 @@ class OcleanNotificationParser:
             self._buffer.extend(data)
             return self._finish() if len(self._buffer) >= self._expected else {}
 
+        if data[:2] == b"\x00\x00" and len(data) >= 3 and data[2] <= 100:
+            return {KEY_SCORE: data[2]}
         if not data.startswith(_MAGIC) or len(data) < 7:
             return {}
 
@@ -237,6 +250,19 @@ if __name__ == "__main__":
     assert parser.feed_status(bytes.fromhex("0303020e4b640000")) == {
         KEY_BATTERY: 100
     }
+    inline = parser.feed_status(
+        bytes.fromhex("03072a422300001a021510191fe7001e001e6400")
+    )
+    assert inline[KEY_LAST_SESSION] == datetime(
+        2026, 2, 21, 16, 25, 31, tzinfo=UTC
+    )
+    merge_update(
+        inline,
+        parser.feed_status(
+            bytes.fromhex("00005f00ffffffffffffff1a0215101a23e7001e")
+        ),
+    )
+    assert inline[KEY_SCORE] == 95
     parsed = parser.feed_session(future[13:] + record)
     assert parsed[KEY_LAST_SESSION] == datetime(2026, 7, 17, 12, 34, 56, tzinfo=UTC)
     assert parsed[KEY_PROGRAM] == 76
