@@ -1,6 +1,6 @@
 """Constants and protocol parsing for the Oclean integration."""
 
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, timezone as fixed_timezone, tzinfo
 from typing import Any
 
 DOMAIN = "oclean"
@@ -117,7 +117,19 @@ def _parse_session(
     """Parse confirmed fields from one Type-1 session record."""
     if len(record) < 9:
         return {}
-    years = (2000 + record[0],) if record[0] else (now.year, now.year - 1)
+    session_timezone = timezone
+    if len(record) >= SESSION_RECORD_SIZE and 1 <= record[17] <= len(
+        _TZ_OFFSETS_MIN
+    ):
+        session_timezone = fixed_timezone(
+            timedelta(minutes=_TZ_OFFSETS_MIN[record[17] - 1])
+        )
+    session_now = now.astimezone(session_timezone)
+    years = (
+        (2000 + record[0],)
+        if record[0]
+        else (session_now.year, session_now.year - 1)
+    )
     local = None
     for year in years:
         try:
@@ -128,17 +140,17 @@ def _parse_session(
                 record[3],
                 record[4],
                 record[5],
-                tzinfo=timezone,
+                tzinfo=session_timezone,
             )
         except ValueError:
             continue
-        if record[0] or candidate <= now + MAX_FUTURE_SKEW:
+        if record[0] or candidate <= session_now + MAX_FUTURE_SKEW:
             local = candidate
             break
     if (
         local is None
         or local.year < MIN_SESSION_YEAR
-        or local > now + MAX_FUTURE_SKEW
+        or local > session_now + MAX_FUTURE_SKEW
     ):
         return {}
 
@@ -167,11 +179,7 @@ class OcleanNotificationParser:
             return {KEY_BATTERY: data[5]}
         if data[:2] == b"\x00\x00" and len(data) >= 3 and data[2] <= 100:
             return {KEY_SCORE: data[2]}
-        if (
-            data.startswith(_MAGIC)
-            and len(data) >= 7
-            and data[5:7] == b"\x00\x00"
-        ):
+        if data.startswith(_MAGIC) and len(data) >= 7:
             return _parse_session(
                 data[7:], self._timezone, datetime.now(self._timezone)
             )
@@ -205,6 +213,13 @@ class OcleanNotificationParser:
         """Return the newest complete record from a partial transfer."""
         if not self._expected:
             return {}
+        if len(self._buffer) < SESSION_RECORD_SIZE:
+            data = bytes(self._buffer)
+            self._buffer.clear()
+            self._expected = 0
+            return _parse_session(
+                data, self._timezone, datetime.now(self._timezone)
+            )
         self._expected = len(self._buffer) // SESSION_RECORD_SIZE * SESSION_RECORD_SIZE
         return self._finish()
 
@@ -256,18 +271,48 @@ if __name__ == "__main__":
     assert inline[KEY_LAST_SESSION] == datetime(
         2026, 2, 21, 16, 25, 31, tzinfo=UTC
     )
-    merge_update(
-        inline,
-        parser.feed_status(
-            bytes.fromhex("00005f00ffffffffffffff1a0215101a23e7001e")
-        ),
-    )
+    score_push = bytes.fromhex("00005f00ffffffffffffff1a0215101a23e7001e")
+    merge_update(inline, parser.feed_status(score_push))
     assert inline[KEY_SCORE] == 95
     parsed = parser.feed_session(future[13:] + record)
     assert parsed[KEY_LAST_SESSION] == datetime(2026, 7, 17, 12, 34, 56, tzinfo=UTC)
     assert parsed[KEY_PROGRAM] == 76
     assert parsed[KEY_DURATION] == 150
     assert parsed[KEY_SCORE] == 98
+
+    short_frame = bytes.fromhex("03072a422300011a02181535134c009600960b03")
+    short = parser.feed_status(short_frame)
+    assert short[KEY_PROGRAM] == 76
+    assert short[KEY_DURATION] == 150
+    short_parser = OcleanNotificationParser(UTC)
+    assert not short_parser.feed_session(short_frame)
+    assert short_parser.flush()[KEY_DURATION] == 150
+
+    scoreless = bytearray(record)
+    scoreless[33] = 0
+    partial_parser = OcleanNotificationParser(UTC)
+    assert not partial_parser.feed_session(
+        _MAGIC + b"\x00\x02" + scoreless
+    )
+    pending_score = partial_parser.feed_status(score_push)
+    recovered = partial_parser.flush()
+    merge_update(recovered, pending_score)
+    assert recovered[KEY_SCORE] == 95
+
+    timezone_record = bytes.fromhex(
+        "1a030b14021700007800780514"
+        "4b0000001f00000000001c14190c0a0a0a000000"
+        "5b030301ffffffff1a"
+    )
+    timezone_parser = OcleanNotificationParser(
+        fixed_timezone(timedelta(hours=1))
+    )
+    timezone_session = timezone_parser.feed_session(
+        _MAGIC + b"\x00\x01" + timezone_record
+    )
+    assert timezone_session[KEY_LAST_SESSION] == datetime(
+        2026, 3, 11, 9, 2, 23, tzinfo=UTC
+    )
 
     cached = {KEY_LAST_SESSION: datetime(2025, 1, 1, tzinfo=UTC), KEY_SCORE: 90}
     merge_update(

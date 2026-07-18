@@ -160,6 +160,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 parser = OcleanNotificationParser(timezone)
                 session_received = asyncio.Event()
                 pending_score: int | None = None
+                last_payloads: dict[str, bytes] = {}
 
                 def accept(parsed: dict[str, Any]) -> None:
                     nonlocal pending_score
@@ -179,6 +180,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 def status_handler(_sender: Any, raw: bytearray) -> None:
                     payload = bytes(raw)
+                    last_payloads[READ_NOTIFY_UUID] = payload
                     _LOGGER.debug(
                         "Oclean %s status notification: %s",
                         self.address,
@@ -188,6 +190,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 def session_handler(_sender: Any, raw: bytearray) -> None:
                     payload = bytes(raw)
+                    last_payloads[RECEIVE_BRUSH_UUID] = payload
                     _LOGGER.debug(
                         "Oclean %s session notification: %s",
                         self.address,
@@ -231,40 +234,44 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                     await asyncio.sleep(0.1)
 
-                if RECEIVE_BRUSH_UUID in subscribed:
+                if subscribed:
                     with suppress(TimeoutError):
                         await asyncio.wait_for(session_received.wait(), timeout=8)
-                else:
-                    direct_read_ok = False
-                    previous_payloads: dict[str, bytes] = {}
+
+                channels = (
+                    (RECEIVE_BRUSH_UUID, session_handler),
+                    (READ_NOTIFY_UUID, status_handler),
+                )
+                poll_channels = (
+                    channels
+                    if not session_received.is_set()
+                    else tuple(
+                        channel for channel in channels if channel[0] not in subscribed
+                    )
+                )
+                if poll_channels:
                     for _attempt in range(6):
                         await asyncio.sleep(1)
-                        for uuid, handler in (
-                            (RECEIVE_BRUSH_UUID, session_handler),
-                            (READ_NOTIFY_UUID, status_handler),
-                        ):
+                        for uuid, handler in poll_channels:
                             try:
                                 payload = bytes(await client.read_gatt_char(uuid))
                             except (BleakError, TimeoutError):
                                 continue
-                            direct_read_ok = True
                             if (
                                 len(payload) > 2
-                                and payload != previous_payloads.get(uuid)
+                                and payload != last_payloads.get(uuid)
                             ):
-                                previous_payloads[uuid] = payload
                                 handler(None, bytearray(payload))
                         if session_received.is_set() and KEY_SCORE in data:
                             break
-                    if not direct_read_ok:
-                        _LOGGER.warning(
-                            "Unable to receive Oclean session data from %s: "
-                            "notifications and direct reads unavailable",
-                            self.address,
-                        )
+
+                accept(parser.flush())
                 if session_received.is_set():
                     await asyncio.sleep(ENRICHMENT_WAIT)
-                merge_update(data, parser.flush())
+                else:
+                    _LOGGER.warning(
+                        "No Oclean session data received from %s", self.address
+                    )
 
                 for uuid in subscribed:
                     with suppress(BleakError, TimeoutError):
