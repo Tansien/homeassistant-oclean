@@ -111,6 +111,11 @@ def merge_update(current: dict[str, Any], incoming: dict[str, Any]) -> bool:
     return True
 
 
+def is_empty_session_response(data: bytes) -> bool:
+    """Return whether a frame is a complete empty-history response."""
+    return data == _MAGIC + b"\x00\x00"
+
+
 def _parse_session(
     record: bytes, timezone: tzinfo, now: datetime
 ) -> dict[str, Any]:
@@ -261,6 +266,10 @@ if __name__ == "__main__":
     future[0] = 255
     future[33] = 91
     parser = OcleanNotificationParser(UTC)
+    empty_frame = bytes.fromhex("03072a42230000")
+    assert is_empty_session_response(empty_frame)
+    assert not parser.feed_status(empty_frame)
+    assert not parser.feed_session(empty_frame)
     assert not parser.feed_session(_MAGIC + b"\x00\x02" + future[:13])
     assert parser.feed_status(bytes.fromhex("0303020e4b640000")) == {
         KEY_BATTERY: 100
@@ -281,6 +290,7 @@ if __name__ == "__main__":
     assert parsed[KEY_SCORE] == 98
 
     short_frame = bytes.fromhex("03072a422300011a02181535134c009600960b03")
+    assert not is_empty_session_response(short_frame)
     short = parser.feed_status(short_frame)
     assert short[KEY_PROGRAM] == 76
     assert short[KEY_DURATION] == 150

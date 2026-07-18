@@ -48,6 +48,7 @@ from .const import (
     SOFTWARE_REVISION_UUID,
     WRITE_UUID,
     build_time_command,
+    is_empty_session_response,
     merge_update,
     parse_battery_level,
 )
@@ -159,12 +160,15 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 timezone = ZoneInfo(self.hass.config.time_zone)
                 parser = OcleanNotificationParser(timezone)
                 session_received = asyncio.Event()
+                session_response_received = asyncio.Event()
                 pending_score: int | None = None
                 last_payloads: dict[str, bytes] = {}
                 session_transport_ok = False
 
                 def accept(parsed: dict[str, Any]) -> None:
                     nonlocal pending_score
+                    if KEY_LAST_SESSION in parsed:
+                        session_response_received.set()
                     if KEY_SCORE in parsed and KEY_LAST_SESSION not in parsed:
                         if not session_received.is_set():
                             pending_score = parsed[KEY_SCORE]
@@ -189,7 +193,10 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         payload.hex(),
                     )
                     parsed = parser.feed_status(payload)
-                    if KEY_LAST_SESSION in parsed or KEY_SCORE in parsed:
+                    if is_empty_session_response(payload):
+                        session_response_received.set()
+                        session_transport_ok = True
+                    elif KEY_LAST_SESSION in parsed or KEY_SCORE in parsed:
                         session_transport_ok = True
                     accept(parsed)
 
@@ -197,6 +204,8 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     nonlocal session_transport_ok
                     payload = bytes(raw)
                     session_transport_ok = True
+                    if is_empty_session_response(payload):
+                        session_response_received.set()
                     last_payloads[RECEIVE_BRUSH_UUID] = payload
                     _LOGGER.debug(
                         "Oclean %s session notification: %s",
@@ -243,7 +252,9 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 if subscribed:
                     with suppress(TimeoutError):
-                        await asyncio.wait_for(session_received.wait(), timeout=8)
+                        await asyncio.wait_for(
+                            session_response_received.wait(), timeout=8
+                        )
 
                 channels = (
                     (RECEIVE_BRUSH_UUID, session_handler),
@@ -251,10 +262,12 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 poll_channels = (
                     channels
-                    if not session_received.is_set()
+                    if not session_response_received.is_set()
                     else tuple(
                         channel for channel in channels if channel[0] not in subscribed
                     )
+                    if session_received.is_set()
+                    else ()
                 )
                 if poll_channels:
                     for _attempt in range(6):
@@ -271,7 +284,9 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 and payload != last_payloads.get(uuid)
                             ):
                                 handler(None, bytearray(payload))
-                        if session_received.is_set() and KEY_SCORE in data:
+                        if session_response_received.is_set() and (
+                            not session_received.is_set() or KEY_SCORE in data
+                        ):
                             break
 
                 accept(parser.flush())
