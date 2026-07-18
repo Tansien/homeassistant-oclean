@@ -234,6 +234,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                     await asyncio.sleep(0.1)
 
+                transport_ok = bool(subscribed)
                 if subscribed:
                     with suppress(TimeoutError):
                         await asyncio.wait_for(session_received.wait(), timeout=8)
@@ -257,6 +258,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 payload = bytes(await client.read_gatt_char(uuid))
                             except (BleakError, TimeoutError):
                                 continue
+                            transport_ok = True
                             if (
                                 len(payload) > 2
                                 and payload != last_payloads.get(uuid)
@@ -268,9 +270,15 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 accept(parser.flush())
                 if session_received.is_set():
                     await asyncio.sleep(ENRICHMENT_WAIT)
+                elif transport_ok:
+                    _LOGGER.debug(
+                        "No Oclean session data returned by %s", self.address
+                    )
                 else:
                     _LOGGER.warning(
-                        "No Oclean session data received from %s", self.address
+                        "Unable to receive Oclean session data from %s: "
+                        "notifications and direct reads unavailable",
+                        self.address,
                     )
 
                 for uuid in subscribed:
