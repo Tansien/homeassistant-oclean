@@ -2,9 +2,9 @@
 
 Early Home Assistant support for Oclean Bluetooth toothbrushes.
 
-The integration discovers nearby Oclean toothbrushes and exposes their standard
-Bluetooth battery level. Communication stays local and works through Home
-Assistant Bluetooth adapters and connectable ESPHome Bluetooth proxies.
+The integration discovers nearby Oclean toothbrushes and reads battery and
+brushing-session data locally through Home Assistant Bluetooth adapters and
+connectable ESPHome Bluetooth proxies.
 
 ## Supported devices
 
@@ -34,14 +34,26 @@ Bluetooth proxy when it is added and when the battery is read.
 Copy `custom_components/oclean` into the `custom_components` directory in your
 Home Assistant configuration, then restart Home Assistant.
 
-## Current scope
+## Sensors
 
-- Bluetooth discovery
-- Battery percentage, refreshed every 30 minutes
-- Last successful battery reading retained while a toothbrush is unreachable
+- Battery percentage
+- Last session timestamp
+- Last session duration
+- Last session score, when retained by the toothbrush
+- Last session program ID
 
-Brushing duration, mode, score, pressure, history, and brush-head life require
-more protocol research and are not exposed yet.
+Values refresh every 30 minutes. The last successful values are retained while
+the toothbrush is asleep or unreachable.
+
+Pressure, tooth-zone mappings, full history, and brush-head life remain excluded
+until they are verified against our device firmware.
+
+## Protocol research
+
+The Type-1 session protocol implementation is based on the APK analysis and
+real-device captures published by the MIT-licensed
+[ha-oclean-integration](https://github.com/deniskie/ha-oclean-integration)
+project.
 
 ## License
 
