@@ -161,6 +161,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 session_received = asyncio.Event()
                 pending_score: int | None = None
                 last_payloads: dict[str, bytes] = {}
+                session_transport_ok = False
 
                 def accept(parsed: dict[str, Any]) -> None:
                     nonlocal pending_score
@@ -179,6 +180,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             pending_score = None
 
                 def status_handler(_sender: Any, raw: bytearray) -> None:
+                    nonlocal session_transport_ok
                     payload = bytes(raw)
                     last_payloads[READ_NOTIFY_UUID] = payload
                     _LOGGER.debug(
@@ -186,10 +188,15 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self.address,
                         payload.hex(),
                     )
-                    accept(parser.feed_status(payload))
+                    parsed = parser.feed_status(payload)
+                    if KEY_LAST_SESSION in parsed or KEY_SCORE in parsed:
+                        session_transport_ok = True
+                    accept(parsed)
 
                 def session_handler(_sender: Any, raw: bytearray) -> None:
+                    nonlocal session_transport_ok
                     payload = bytes(raw)
+                    session_transport_ok = True
                     last_payloads[RECEIVE_BRUSH_UUID] = payload
                     _LOGGER.debug(
                         "Oclean %s session notification: %s",
@@ -234,7 +241,6 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                     await asyncio.sleep(0.1)
 
-                transport_ok = bool(subscribed)
                 if subscribed:
                     with suppress(TimeoutError):
                         await asyncio.wait_for(session_received.wait(), timeout=8)
@@ -258,7 +264,8 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 payload = bytes(await client.read_gatt_char(uuid))
                             except (BleakError, TimeoutError):
                                 continue
-                            transport_ok = True
+                            if uuid == RECEIVE_BRUSH_UUID:
+                                session_transport_ok = True
                             if (
                                 len(payload) > 2
                                 and payload != last_payloads.get(uuid)
@@ -270,7 +277,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 accept(parser.flush())
                 if session_received.is_set():
                     await asyncio.sleep(ENRICHMENT_WAIT)
-                elif transport_ok:
+                elif session_transport_ok:
                     _LOGGER.debug(
                         "No Oclean session data returned by %s", self.address
                     )
