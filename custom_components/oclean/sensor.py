@@ -298,8 +298,7 @@ class OcleanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                 else:
                     _LOGGER.warning(
-                        "Unable to receive Oclean session data from %s: "
-                        "notifications and direct reads unavailable",
+                        "No Oclean session response received from %s",
                         self.address,
                     )
 
