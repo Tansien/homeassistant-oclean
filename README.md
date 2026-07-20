@@ -13,9 +13,7 @@ Tested with:
 - Oclean X Pro Elite (`OCLEANY3P`)
 - Oclean X (`OCLEANY3S`)
 - Oclean X (`OCLEANY3M`)
-
-Oclean X Ultra discovery works, but its battery connection has not yet been
-verified.
+- Oclean X Ultra (`OCLEANV1a`; battery, timestamp, program, and duration)
 
 ## Installation with HACS
 
