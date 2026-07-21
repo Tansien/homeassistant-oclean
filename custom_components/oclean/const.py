@@ -120,6 +120,9 @@ def _parse_session(
     record: bytes, timezone: tzinfo, now: datetime
 ) -> dict[str, Any]:
     """Parse confirmed fields from one Type-1 session record."""
+    # X Ultra/X Pro 20 inline records add a four-byte header before the date.
+    if len(record) == 13 and record[:3] == b"\x00\x00\x00":
+        record = record[4:]
     if len(record) < 9:
         return {}
     session_timezone = timezone
@@ -283,6 +286,39 @@ if __name__ == "__main__":
     score_push = bytes.fromhex("00005f00ffffffffffffff1a0215101a23e7001e")
     merge_update(inline, parser.feed_status(score_push))
     assert inline[KEY_SCORE] == 95
+
+    for raw, offset, expected, program, duration in (
+        (
+            "03072a422300000000006f1a0410162516010078",
+            2,
+            datetime(2026, 4, 16, 20, 37, 22, tzinfo=UTC),
+            1,
+            120,
+        ),
+        (
+            "03072a422300000000004c1a040f172920010078",
+            2,
+            datetime(2026, 4, 15, 21, 41, 32, tzinfo=UTC),
+            1,
+            120,
+        ),
+        (
+            "03072a422300000000005b1a0319100d2e0300c8",
+            1,
+            datetime(2026, 3, 25, 15, 13, 46, tzinfo=UTC),
+            3,
+            200,
+        ),
+    ):
+        ultra = OcleanNotificationParser(
+            fixed_timezone(timedelta(hours=offset))
+        ).feed_status(bytes.fromhex(raw))
+        assert ultra == {
+            KEY_LAST_SESSION: expected,
+            KEY_PROGRAM: program,
+            KEY_DURATION: duration,
+        }
+
     parsed = parser.feed_session(future[13:] + record)
     assert parsed[KEY_LAST_SESSION] == datetime(2026, 7, 17, 12, 34, 56, tzinfo=UTC)
     assert parsed[KEY_PROGRAM] == 76
